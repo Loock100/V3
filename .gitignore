@@ -1,0 +1,25 @@
+# Virtualenv
+.venv/
+venv/
+
+# Arquivos temporários / cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Dados brutos pesados
+data/*.csv
+!data/.gitkeep
+
+# Logs e resultados
+logs/*
+!logs/.gitkeep
+
+runs/*
+!runs/.gitkeep
+
+# Arquivos de editor/IDE
+.vscode/
+.idea/
+*.swp

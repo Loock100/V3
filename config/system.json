@@ -1,0 +1,8 @@
+{
+  "data_dir": "data",
+  "strategies_dir": "strategies",
+  "engine_dir": "engine",
+  "logs_dir": "logs",
+  "runs_dir": "runs",
+  "default_data_file": "data/sample_prices.csv"
+}
