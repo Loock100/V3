@@ -178,41 +178,74 @@ def safe_modify_engine_backtest(path: Path, new_content: str) -> Dict[str, Any]:
 
 def execute_actions(actions: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Executa a lista de ações pedidas pelo modelo.
+    Executa uma lista de ações (vindas do agente) e devolve um dicionário com os resultados.
 
-    Tipos aceitos:
-      - list_dir   : {"type": "list_dir",   "path": "..."}
-      - read_file  : {"type": "read_file",  "path": "..."}
-      - write_file : {"type": "write_file", "path": "...", "content": "..."}
-      - run_command: {"type": "run_command","command": "..."}
+    Tipos de ação suportados:
+      - list_dir:      { "type": "list_dir", "path": "engine" }
+      - read_file:     { "type": "read_file", "path": "engine/backtest.py" }
+      - write_file:    { "type": "write_file", "path": "...", "content": "..." }
+      - modify_engine: { "type": "modify_engine", "path": "engine/backtest.py", "content": "..." }
+      - run_command:   { "type": "run_command", "command": "python engine/backtest.py strategies/xxx.py" }
     """
     results: List[Dict[str, Any]] = []
 
     for action in actions:
         a_type = action.get("type")
 
-        # 1) Operações de diretório
+        # =============== LIST_DIR ===============
         if a_type == "list_dir":
             path = action.get("path", ".")
-            results.append(list_directory(path))
+            try:
+                items = sorted(os.listdir(path))
+                results.append(
+                    {
+                        "type": "list_dir",
+                        "path": path,
+                        "items": items,
+                    }
+                )
+            except Exception as e:
+                results.append(
+                    {
+                        "type": "list_dir",
+                        "path": path,
+                        "error": str(e),
+                    }
+                )
             continue
 
-        # 2) Leitura de arquivo
+        # =============== READ_FILE ===============
         if a_type == "read_file":
             path = action.get("path")
             if not path:
                 results.append(
                     {
                         "type": "read_file",
-                        "path": path,
-                        "error": "Campo 'path' obrigatório para read_file.",
+                        "error": "missing path",
                     }
                 )
-            else:
-                results.append(read_file(path))
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                results.append(
+                    {
+                        "type": "read_file",
+                        "path": path,
+                        "content": content,
+                    }
+                )
+            except Exception as e:
+                results.append(
+                    {
+                        "type": "read_file",
+                        "path": path,
+                        "error": str(e),
+                    }
+                )
             continue
 
-        # 3) Escrita de arquivo
+        # =============== WRITE_FILE ===============
         if a_type == "write_file":
             path = action.get("path")
             content = action.get("content", "")
@@ -220,24 +253,78 @@ def execute_actions(actions: List[Dict[str, Any]]) -> Dict[str, Any]:
                 results.append(
                     {
                         "type": "write_file",
-                        "path": path,
-                        "error": "Campo 'path' obrigatório para write_file.",
+                        "error": "missing path",
                     }
                 )
-            else:
-                results.append(write_file(path, content))
+                continue
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                results.append(
+                    {
+                        "type": "write_file",
+                        "path": path,
+                        "status": "ok",
+                    }
+                )
+            except Exception as e:
+                results.append(
+                    {
+                        "type": "write_file",
+                        "path": path,
+                        "error": str(e),
+                    }
+                )
             continue
 
-        # 4) Execução de comando de terminal (whitelist)
+        # =============== MODIFY_ENGINE ===============
+        if a_type == "modify_engine":
+            if not ALLOW_MODIFY_ENGINE:
+                results.append(
+                    {
+                        "type": "modify_engine",
+                        "status": "blocked",
+                        "reason": "ALLOW_MODIFY_ENGINE=False no driver.py",
+                    }
+                )
+                continue
+
+            path = action.get("path")
+            content = action.get("content", "")
+
+            try:
+                ok, msg = safe_modify_engine_backtest(path, content)
+                status = "ok" if ok else "error"
+                results.append(
+                    {
+                        "type": "modify_engine",
+                        "path": path,
+                        "status": status,
+                        "message": msg,
+                    }
+                )
+            except Exception as e:
+                results.append(
+                    {
+                        "type": "modify_engine",
+                        "path": path,
+                        "status": "error",
+                        "message": str(e),
+                    }
+                )
+            continue
+
+        # =============== RUN_COMMAND ===============
         if a_type == "run_command":
-            command = (action.get("command") or "").strip()
+            command = action.get("command", "").strip()
+
             if not command:
                 results.append(
                     {
                         "type": "run_command",
-                        "command": command,
                         "status": "error",
-                        "error": "Comando vazio.",
+                        "error": "empty command",
                     }
                 )
                 continue
@@ -248,33 +335,22 @@ def execute_actions(actions: List[Dict[str, Any]]) -> Dict[str, Any]:
                         "type": "run_command",
                         "command": command,
                         "status": "blocked",
-                        "error": "Execução de comandos desabilitada pelo driver.",
+                        "error": "Execução de comandos desativada (ALLOW_RUN_COMMANDS=False).",
                     }
                 )
                 continue
 
-            allowed = False
-            reason = ""
+            # Whitelist de comandos que o agente pode rodar
+            allowed_prefixes = [
+                "python engine/fetch_data.py",
+                "python engine/backtest.py",
+                "python engine/analyze_runs.py",
+                "python engine/plot_strategy.py",
+                "python engine/optimize_params.py",
+                "pip install -r requirements.txt",
+            ]
 
-            # === WHITELIST DE COMANDOS PERMITIDOS ===
-            if command.startswith("python engine/fetch_data.py"):
-                allowed = True
-                reason = "fetch_data"
-            elif command.startswith("python engine/backtest.py"):
-                allowed = True
-                reason = "backtest"
-            elif command.startswith("python engine/plot_strategy.py"):
-                allowed = True
-                reason = "plot_strategy"
-            elif command.startswith("python engine/analyze_runs.py"):
-                allowed = True
-                reason = "analyze_runs"
-            elif command.startswith("python engine/optimize_params.py"):
-                allowed = True
-                reason = "optimize_params"
-            elif command.startswith("pip install -r requirements.txt"):
-                allowed = True
-                reason = "pip_install_requirements"
+            allowed = any(command.startswith(p) for p in allowed_prefixes)
 
             if not allowed:
                 results.append(
@@ -283,34 +359,45 @@ def execute_actions(actions: List[Dict[str, Any]]) -> Dict[str, Any]:
                         "command": command,
                         "status": "blocked",
                         "error": (
-                            "Comando bloqueado. O driver só permite atualmente:\n"
-                            "- python engine/fetch_data.py ...\n"
-                            "- python engine/backtest.py ...\n"
-                            "- python engine/plot_strategy.py ...\n"
-                            "- python engine/analyze_runs.py ...\n"
-                            "- python engine/optimize_params.py ...\n"
-                            "- pip install -r requirements.txt\n"
+                            "Comando bloqueado. O driver só permite atualmente:\\n"
+                            "- python engine/fetch_data.py ...\\n"
+                            "- python engine/backtest.py ...\\n"
+                            "- python engine/analyze_runs.py ...\\n"
+                            "- python engine/plot_strategy.py ...\\n"
+                            "- python engine/optimize_params.py ...\\n"
+                            "- pip install -r requirements.txt\\n"
                             f"Comando solicitado: {command}"
                         ),
                     }
                 )
                 continue
 
-            cmd_result = run_shell_command(command)
-            cmd_result["whitelist_reason"] = reason
-            results.append(cmd_result)
+            # Executa o comando permitido
+            result = run_command(command, cwd=str(ROOT_DIR))
+            results.append(
+                {
+                    "type": "run_command",
+                    "command": command,
+                    "status": "ok" if result["returncode"] == 0 else "error",
+                    "returncode": result["returncode"],
+                    "stdout": result["stdout"],
+                    "stderr": result["stderr"],
+                }
+            )
             continue
 
-        # 5) Ação desconhecida
+        # =============== TIPO DESCONHECIDO ===============
         results.append(
             {
                 "type": a_type or "unknown",
-                "raw": action,
+                "status": "error",
                 "error": f"Ação desconhecida: {a_type}",
+                "raw_action": action,
             }
         )
 
     return {"results": results}
+
 
 
 def call_agent(messages: List[Dict[str, str]]) -> Dict[str, Any]:
